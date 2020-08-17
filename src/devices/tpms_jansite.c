@@ -32,7 +32,6 @@ Data layout (nibbles):
 static int tpms_jansite_decode(r_device *decoder, bitbuffer_t *bitbuffer, unsigned row, unsigned bitpos)
 {
     data_t *data;
-    unsigned int start_pos;
     bitbuffer_t packet_bits = {0};
     uint8_t *b;
     unsigned id;
@@ -42,7 +41,12 @@ static int tpms_jansite_decode(r_device *decoder, bitbuffer_t *bitbuffer, unsign
     int temperature;
     char code_str[7 * 2 + 1];
 
-    start_pos = bitbuffer_manchester_decode(bitbuffer, row, bitpos, &packet_bits, 56);
+    bitbuffer_manchester_decode(bitbuffer, row, bitpos, &packet_bits, 56);
+
+    if (packet_bits.bits_per_row[0] < 56) {
+        return DECODE_FAIL_SANITY;
+        // fprintf(stderr, "%s packet_bits.bits_per_row = %d\n", __func__, packet_bits.bits_per_row[0]); 
+    }
     b = packet_bits.bb[0];
 
     // TODO: validate checksum

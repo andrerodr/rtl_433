@@ -12,8 +12,10 @@
 #include "pulse_detect.h"
 #include "pulse_demod.h"
 #include "pulse_detect_fsk.h"
+#include "baseband.h"
 #include "util.h"
-#include "decoder.h"
+#include "r_device.h"
+#include "r_util.h"
 #include "fatal.h"
 #include <limits.h>
 #include <stdio.h>
@@ -183,29 +185,34 @@ void pulse_data_dump(FILE *file, pulse_data_t *data)
 }
 
 // OOK adaptive level estimator constants
-#define OOK_HIGH_LOW_RATIO  8           // Default ratio between high and low (noise) level
-#define OOK_MIN_HIGH_LEVEL  1000        // Minimum estimate of high level
-#define OOK_MAX_HIGH_LEVEL  (128*128)   // Maximum estimate for high level (A unit phasor is 128, anything above is overdrive)
-#define OOK_MAX_LOW_LEVEL   (OOK_MAX_HIGH_LEVEL/2)    // Maximum estimate for low level
+#define OOK_MAX_HIGH_LEVEL  DB_TO_AMP(0)   // Maximum estimate for high level (-0 dB)
+#define OOK_MAX_LOW_LEVEL   DB_TO_AMP(-15) // Maximum estimate for low level
 #define OOK_EST_HIGH_RATIO  64          // Constant for slowness of OOK high level estimator
 #define OOK_EST_LOW_RATIO   1024        // Constant for slowness of OOK low level (noise) estimator (very slow)
 
 /// Internal state data for pulse_pulse_package()
 struct pulse_detect {
+    int use_mag_est;          ///< Wether the envelope data is an amplitude or magnitude.
+    int ook_fixed_high_level; ///< Manual detection level override, 0 = auto.
+    int ook_min_high_level;   ///< Minimum estimate of high level (-12 dB: 1000 amp, 4000 mag).
+    int ook_high_low_ratio;   ///< Default ratio between high and low (noise) level (9 dB: x8 amp, 11 dB: x3.6 mag).
+
     enum {
         PD_OOK_STATE_IDLE      = 0,
         PD_OOK_STATE_PULSE     = 1,
         PD_OOK_STATE_GAP_START = 2,
         PD_OOK_STATE_GAP       = 3
     } ook_state;
-    int pulse_length; // Counter for internal pulse detection
-    int max_pulse;    // Size of biggest pulse detected
+    int pulse_length; ///< Counter for internal pulse detection
+    int max_pulse;    ///< Size of biggest pulse detected
 
-    int data_counter;    // Counter for how much of data chunk is processed
-    int lead_in_counter; // Counter for allowing initial noise estimate to settle
+    int data_counter;    ///< Counter for how much of data chunk is processed
+    int lead_in_counter; ///< Counter for allowing initial noise estimate to settle
 
-    int ook_low_estimate;  // Estimate for the OOK low level (base noise level) in the envelope data
-    int ook_high_estimate; // Estimate for the OOK high level
+    int ook_low_estimate;  ///< Estimate for the OOK low level (base noise level) in the envelope data
+    int ook_high_estimate; ///< Estimate for the OOK high level
+
+    int verbosity; ///< Debug output verbosity, 0=None, 1=Levels, 2=Histograms
 
     pulse_FSK_state_t FSK_state;
 };
@@ -213,8 +220,13 @@ struct pulse_detect {
 pulse_detect_t *pulse_detect_create()
 {
     pulse_detect_t *pulse_detect = calloc(1, sizeof(pulse_detect_t));
-    if (!pulse_detect)
+    if (!pulse_detect) {
         WARN_CALLOC("pulse_detect_create()");
+        return NULL;
+    }
+
+    pulse_detect_set_levels(pulse_detect, 0, 0.0, -12.1442, 9.0, 0);
+
     return pulse_detect;
 }
 
@@ -223,12 +235,124 @@ void pulse_detect_free(pulse_detect_t *pulse_detect)
     free(pulse_detect);
 }
 
-/// Demodulate On/Off Keying (OOK) and Frequency Shift Keying (FSK) from an envelope signal
-int pulse_detect_package(pulse_detect_t *pulse_detect, int16_t const *envelope_data, int16_t const *fm_data, int len, int16_t level_limit, uint32_t samp_rate, uint64_t sample_offset, pulse_data_t *pulses, pulse_data_t *fsk_pulses, unsigned fpdm)
+void pulse_detect_set_levels(pulse_detect_t *pulse_detect, int use_mag_est, float fixed_high_level, float min_high_level, float high_low_ratio, int verbosity)
 {
+    pulse_detect->use_mag_est = use_mag_est;
+    if (use_mag_est) {
+        pulse_detect->ook_fixed_high_level = fixed_high_level < 0.0 ? DB_TO_MAG(fixed_high_level) : 0;
+        pulse_detect->ook_min_high_level   = DB_TO_MAG(min_high_level);
+        pulse_detect->ook_high_low_ratio = DB_TO_MAG_F(high_low_ratio);
+    }
+    else { // amp est
+        pulse_detect->ook_fixed_high_level = fixed_high_level < 0.0 ? DB_TO_AMP(fixed_high_level) : 0;
+        pulse_detect->ook_min_high_level   = DB_TO_AMP(min_high_level);
+        pulse_detect->ook_high_low_ratio = DB_TO_AMP_F(high_low_ratio);
+    }
+    pulse_detect->verbosity = verbosity;
+
+    //fprintf(stderr, "fixed_high_level %.1f (%d), min_high_level %.1f (%d), high_low_ratio %.1f (%d)\n",
+    //        fixed_high_level, pulse_detect->ook_fixed_high_level,
+    //        min_high_level, pulse_detect->ook_min_high_level,
+    //        high_low_ratio, pulse_detect->ook_high_low_ratio);
+}
+
+/// convert amplitude (16384 FS) to attenuation in (integer) dB, offset by 3.
+static inline int amp_to_att(int a)
+{
+    if (a > 32690) return 0;  // = 10^(( 3 + 42.1442) / 10)
+    if (a > 25967) return 1;  // = 10^(( 2 + 42.1442) / 10)
+    if (a > 20626) return 2;  // = 10^(( 1 + 42.1442) / 10)
+    if (a > 16383) return 3;  // = 10^(( 0 + 42.1442) / 10)
+    if (a > 13014) return 4;  // = 10^((-1 + 42.1442) / 10)
+    if (a > 10338) return 5;  // = 10^((-2 + 42.1442) / 10)
+    if (a >  8211) return 6;  // = 10^((-3 + 42.1442) / 10)
+    if (a >  6523) return 7;  // = 10^((-4 + 42.1442) / 10)
+    if (a >  5181) return 8;  // = 10^((-5 + 42.1442) / 10)
+    if (a >  4115) return 9;  // = 10^((-6 + 42.1442) / 10)
+    if (a >  3269) return 10; // = 10^((-7 + 42.1442) / 10)
+    if (a >  2597) return 11; // = 10^((-8 + 42.1442) / 10)
+    if (a >  2063) return 12; // = 10^((-9 + 42.1442) / 10)
+    if (a >  1638) return 13; // = 10^((-10 + 42.1442) / 10)
+    if (a >  1301) return 14; // = 10^((-11 + 42.1442) / 10)
+    if (a >  1034) return 15; // = 10^((-12 + 42.1442) / 10)
+    if (a >   821) return 16; // = 10^((-13 + 42.1442) / 10)
+    if (a >   652) return 17; // = 10^((-14 + 42.1442) / 10)
+    if (a >   518) return 18; // = 10^((-15 + 42.1442) / 10)
+    if (a >   412) return 19; // = 10^((-16 + 42.1442) / 10)
+    if (a >   327) return 20; // = 10^((-17 + 42.1442) / 10)
+    if (a >   260) return 21; // = 10^((-18 + 42.1442) / 10)
+    if (a >   206) return 22; // = 10^((-19 + 42.1442) / 10)
+    if (a >   164) return 23; // = 10^((-20 + 42.1442) / 10)
+    if (a >   130) return 24; // = 10^((-21 + 42.1442) / 10)
+    if (a >   103) return 25; // = 10^((-22 + 42.1442) / 10)
+    if (a >    82) return 26; // = 10^((-23 + 42.1442) / 10)
+    if (a >    65) return 27; // = 10^((-24 + 42.1442) / 10)
+    if (a >    52) return 28; // = 10^((-25 + 42.1442) / 10)
+    if (a >    41) return 29; // = 10^((-26 + 42.1442) / 10)
+    if (a >    33) return 30; // = 10^((-27 + 42.1442) / 10)
+    if (a >    26) return 31; // = 10^((-28 + 42.1442) / 10)
+    if (a >    21) return 32; // = 10^((-29 + 42.1442) / 10)
+    if (a >    16) return 33; // = 10^((-30 + 42.1442) / 10)
+    if (a >    13) return 34; // = 10^((-31 + 42.1442) / 10)
+    if (a >    10) return 35; // = 10^((-32 + 42.1442) / 10)
+    return 36;
+}
+/// convert magnitude (16384 FS) to attenuation in (integer) dB, offset by 3.
+static inline int mag_to_att(int m)
+{
+    if (m > 23143) return 0;  // = 10^(( 3 + 84.2884) / 20)
+    if (m > 20626) return 1;  // = 10^(( 2 + 84.2884) / 20)
+    if (m > 18383) return 2;  // = 10^(( 1 + 84.2884) / 20)
+    if (m > 16383) return 3;  // = 10^(( 0 + 84.2884) / 20)
+    if (m > 14602) return 4;  // = 10^((-1 + 84.2884) / 20)
+    if (m > 13014) return 5;  // = 10^((-2 + 84.2884) / 20)
+    if (m > 11599) return 6;  // = 10^((-3 + 84.2884) / 20)
+    if (m > 10338) return 7;  // = 10^((-4 + 84.2884) / 20)
+    if (m >  9213) return 8;  // = 10^((-5 + 84.2884) / 20)
+    if (m >  8211) return 9;  // = 10^((-6 + 84.2884) / 20)
+    if (m >  7318) return 10; // = 10^((-7 + 84.2884) / 20)
+    if (m >  6523) return 11; // = 10^((-8 + 84.2884) / 20)
+    if (m >  5813) return 12; // = 10^((-9 + 84.2884) / 20)
+    if (m >  5181) return 13; // = 10^((-10 + 84.2884) / 20)
+    if (m >  4618) return 14; // = 10^((-11 + 84.2884) / 20)
+    if (m >  4115) return 15; // = 10^((-12 + 84.2884) / 20)
+    if (m >  3668) return 16; // = 10^((-13 + 84.2884) / 20)
+    if (m >  3269) return 17; // = 10^((-14 + 84.2884) / 20)
+    if (m >  2914) return 18; // = 10^((-15 + 84.2884) / 20)
+    if (m >  2597) return 19; // = 10^((-16 + 84.2884) / 20)
+    if (m >  2314) return 20; // = 10^((-17 + 84.2884) / 20)
+    if (m >  2063) return 21; // = 10^((-18 + 84.2884) / 20)
+    if (m >  1838) return 22; // = 10^((-19 + 84.2884) / 20)
+    if (m >  1638) return 23; // = 10^((-20 + 84.2884) / 20)
+    if (m >  1460) return 24; // = 10^((-21 + 84.2884) / 20)
+    if (m >  1301) return 25; // = 10^((-22 + 84.2884) / 20)
+    if (m >  1160) return 26; // = 10^((-23 + 84.2884) / 20)
+    if (m >  1034) return 27; // = 10^((-24 + 84.2884) / 20)
+    if (m >   921) return 28; // = 10^((-25 + 84.2884) / 20)
+    if (m >   821) return 29; // = 10^((-26 + 84.2884) / 20)
+    if (m >   732) return 30; // = 10^((-27 + 84.2884) / 20)
+    if (m >   652) return 31; // = 10^((-28 + 84.2884) / 20)
+    if (m >   581) return 32; // = 10^((-29 + 84.2884) / 20)
+    if (m >   518) return 33; // = 10^((-30 + 84.2884) / 20)
+    if (m >   462) return 34; // = 10^((-31 + 84.2884) / 20)
+    if (m >   412) return 35; // = 10^((-32 + 84.2884) / 20)
+    return 36;
+}
+/// print a simple attenuation histogram.
+static void print_att_hist(char const *s, int att_hist[])
+{
+    fprintf(stderr, "\n%s\n", s);
+    for (int i = 0; i < 37; ++i)
+        fprintf(stderr, ">%3d dB: %5d smps\n", 3 - i, att_hist[i]);
+}
+
+/// Demodulate On/Off Keying (OOK) and Frequency Shift Keying (FSK) from an envelope signal
+int pulse_detect_package(pulse_detect_t *pulse_detect, int16_t const *envelope_data, int16_t const *fm_data, int len, uint32_t samp_rate, uint64_t sample_offset, pulse_data_t *pulses, pulse_data_t *fsk_pulses, unsigned fpdm)
+{
+    int att_hist[37] = {0};
     int const samples_per_ms = samp_rate / 1000;
     pulse_detect_t *s = pulse_detect;
-    s->ook_high_estimate = MAX(s->ook_high_estimate, OOK_MIN_HIGH_LEVEL);    // Be sure to set initial minimum level
+    s->ook_high_estimate = MAX(s->ook_high_estimate, pulse_detect->ook_min_high_level);    // Be sure to set initial minimum level
 
     if (s->data_counter == 0) {
         // age the pulse_data if this is a fresh buffer
@@ -240,9 +364,13 @@ int pulse_detect_package(pulse_detect_t *pulse_detect, int16_t const *envelope_d
     while (s->data_counter < len) {
         // Calculate OOK detection threshold and hysteresis
         int16_t const am_n    = envelope_data[s->data_counter];
-        int16_t ook_threshold = s->ook_low_estimate + (s->ook_high_estimate - s->ook_low_estimate) / 2;
-        if (level_limit != 0)
-            ook_threshold = level_limit;                  // Manual override
+        if (pulse_detect->verbosity) {
+            int att = pulse_detect->use_mag_est ? mag_to_att(am_n) : amp_to_att(am_n);
+            att_hist[att]++;
+        }
+        int16_t ook_threshold = (s->ook_low_estimate + s->ook_high_estimate) / 2;
+        if (pulse_detect->ook_fixed_high_level != 0)
+            ook_threshold = pulse_detect->ook_fixed_high_level; // Manual override
         int16_t const ook_hysteresis = ook_threshold / 8; // ±12%
 
         // OOK State machine
@@ -273,8 +401,8 @@ int pulse_detect_package(pulse_detect_t *pulse_detect, int16_t const *envelope_d
                     s->ook_low_estimate += ook_low_delta / OOK_EST_LOW_RATIO;
                     s->ook_low_estimate += ((ook_low_delta > 0) ? 1 : -1);    // Hack to compensate for lack of fixed-point scaling
                     // Calculate default OOK high level estimate
-                    s->ook_high_estimate = OOK_HIGH_LOW_RATIO * s->ook_low_estimate;    // Default is a ratio of low level
-                    s->ook_high_estimate = MAX(s->ook_high_estimate, OOK_MIN_HIGH_LEVEL);
+                    s->ook_high_estimate = pulse_detect->ook_high_low_ratio * s->ook_low_estimate; // Default is a ratio of low level
+                    s->ook_high_estimate = MAX(s->ook_high_estimate, pulse_detect->ook_min_high_level);
                     s->ook_high_estimate = MIN(s->ook_high_estimate, OOK_MAX_HIGH_LEVEL);
                     if (s->lead_in_counter <= OOK_EST_LOW_RATIO) s->lead_in_counter++;        // Allow initial estimate to settle
                 }
@@ -299,7 +427,7 @@ int pulse_detect_package(pulse_detect_t *pulse_detect, int16_t const *envelope_d
                 else {
                     // Calculate OOK high level estimate
                     s->ook_high_estimate += am_n / OOK_EST_HIGH_RATIO - s->ook_high_estimate / OOK_EST_HIGH_RATIO;
-                    s->ook_high_estimate = MAX(s->ook_high_estimate, OOK_MIN_HIGH_LEVEL);
+                    s->ook_high_estimate = MAX(s->ook_high_estimate, pulse_detect->ook_min_high_level);
                     s->ook_high_estimate = MIN(s->ook_high_estimate, OOK_MAX_HIGH_LEVEL);
                     // Estimate pulse carrier frequency
                     pulses->fsk_f1_est += fm_data[s->data_counter] / OOK_EST_HIGH_RATIO - pulses->fsk_f1_est / OOK_EST_HIGH_RATIO;
@@ -335,6 +463,14 @@ int pulse_detect_package(pulse_detect_t *pulse_detect, int16_t const *envelope_d
                         pulses->end_ago = len - s->data_counter;
                         fsk_pulses->end_ago = len - s->data_counter;
                         s->ook_state = PD_OOK_STATE_IDLE;    // Ensure everything is reset
+                        if (pulse_detect->verbosity > 1)
+                            print_att_hist("PULSE_DATA_FSK", att_hist);
+                        if (pulse_detect->verbosity)
+                            fprintf(stderr, "Levels low: -%d dB  high: -%d dB  thres: -%d dB  hyst: (-%d to -%d dB)\n",
+                                    mag_to_att(s->ook_low_estimate), mag_to_att(s->ook_high_estimate),
+                                    mag_to_att(ook_threshold),
+                                    mag_to_att(ook_threshold + ook_hysteresis),
+                                    mag_to_att(ook_threshold - ook_hysteresis));
                         return PULSE_DATA_FSK;
                     }
                 } // if
@@ -360,6 +496,8 @@ int pulse_detect_package(pulse_detect_t *pulse_detect, int16_t const *envelope_d
                         pulses->ook_low_estimate = s->ook_low_estimate;
                         pulses->ook_high_estimate = s->ook_high_estimate;
                         pulses->end_ago = len - s->data_counter;
+                        if (pulse_detect->verbosity > 1)
+                            print_att_hist("PULSE_DATA_OOK MAX_PULSES", att_hist);
                         return PULSE_DATA_OOK;    // End Of Package!!
                     }
 
@@ -378,6 +516,14 @@ int pulse_detect_package(pulse_detect_t *pulse_detect, int16_t const *envelope_d
                     pulses->ook_low_estimate = s->ook_low_estimate;
                     pulses->ook_high_estimate = s->ook_high_estimate;
                     pulses->end_ago = len - s->data_counter;
+                    if (pulse_detect->verbosity > 1)
+                        print_att_hist("PULSE_DATA_OOK EOP", att_hist);
+                    if (pulse_detect->verbosity)
+                        fprintf(stderr, "Levels low: -%d dB  high: -%d dB  thres: -%d dB  hyst: (-%d to -%d dB)\n",
+                                mag_to_att(s->ook_low_estimate), mag_to_att(s->ook_high_estimate),
+                                mag_to_att(ook_threshold),
+                                mag_to_att(ook_threshold + ook_hysteresis),
+                                mag_to_att(ook_threshold - ook_hysteresis));
                     return PULSE_DATA_OOK;    // End Of Package!!
                 }
                 break;
@@ -389,6 +535,8 @@ int pulse_detect_package(pulse_detect_t *pulse_detect, int16_t const *envelope_d
     } // while
 
     s->data_counter = 0;
+    if (pulse_detect->verbosity > 2)
+        print_att_hist("Out of data", att_hist);
     return 0;    // Out of data
 }
 

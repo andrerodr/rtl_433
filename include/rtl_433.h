@@ -15,12 +15,6 @@
 #define DEFAULT_ASYNC_BUF_NUMBER    0 // Force use of default value (librtlsdr default: 15)
 #define DEFAULT_BUF_LENGTH      (16 * 32 * 512) // librtlsdr default
 #define FSK_PULSE_DETECTOR_LIMIT 800000000
-/*
- * Theoretical high level at I/Q saturation is 128x128 = 16384 (above is ripple)
- * 0 = automatic adaptive level limit, else fixed level limit
- * 8000 = previous fixed default
- */
-#define DEFAULT_LEVEL_LIMIT     0
 
 #define MINIMAL_BUF_LENGTH      512
 #define MAXIMAL_BUF_LENGTH      (256 * 16384)
@@ -58,6 +52,7 @@ typedef struct r_cfg {
     char const *in_filename;
     int do_exit;
     int do_exit_async;
+    int exit_code; ///< 0=no err, 1=params or cmd line err, 2=sdr device read error, 3=usb init error, 5=USB error (reset), other=other error
     int frequencies;
     int frequency_index;
     uint32_t frequency[MAX_FREQS];

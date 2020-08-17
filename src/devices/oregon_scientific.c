@@ -23,12 +23,11 @@
 #define ID_THN132N  0xec40 // same as THR228N but different packet size
 #define ID_RTGN318  0x0cc3 // warning: id is from 0x0cc3 and 0xfcc3
 #define ID_RTGN129  0x0cc3 // same as RTGN318 but different packet size
-#define ID_THGR810  0xf824
+#define ID_THGR810  0xf824 // This might be ID_THGR81, but what's true is lost in (git) history
 #define ID_THGR810a 0xf8b4 // unconfirmed version
 #define ID_THN802   0xc844
 #define ID_PCR800   0x2914
 #define ID_PCR800a  0x2d14 // Different PCR800 ID - AU version I think
-#define ID_THGR81   0xf824
 #define ID_WGR800   0x1984
 #define ID_WGR800a  0x1994 // unconfirmed version
 #define ID_WGR968   0x3d00
@@ -273,16 +272,16 @@ static int oregon_scientific_v2_1_decode(r_device *decoder, bitbuffer_t *bitbuff
     else if (sensor_id == ID_BHTR968) {
         if (validate_os_v2_message(decoder, msg, 92, msg_bits, 19) != 0)
             return 0;
-        unsigned int comfort = msg[7] >> 4;
-        char *comfort_str = "Normal";
-        if (comfort == 4) comfort_str = "Comfortable";
-        else if (comfort == 8) comfort_str = "Dry";
-        else if (comfort == 0xc) comfort_str = "Humid";
-        unsigned int forecast = msg[9] >> 4;
-        char *forecast_str = "Cloudy";
-        if (forecast == 3) forecast_str = "Rainy";
-        else if (forecast == 6) forecast_str = "Partly Cloudy";
-        else if (forecast == 0xc) forecast_str = "Sunny";
+        //unsigned int comfort = msg[7] >> 4;
+        //char *comfort_str = "Normal";
+        //if (comfort == 4) comfort_str = "Comfortable";
+        //else if (comfort == 8) comfort_str = "Dry";
+        //else if (comfort == 0xc) comfort_str = "Humid";
+        //unsigned int forecast = msg[9] >> 4;
+        //char *forecast_str = "Cloudy";
+        //if (forecast == 3) forecast_str = "Rainy";
+        //else if (forecast == 6) forecast_str = "Partly Cloudy";
+        //else if (forecast == 0xc) forecast_str = "Sunny";
         float temp_c = get_os_temperature(msg);
         float pressure = ((msg[7] & 0x0f) | (msg[8] & 0xf0)) + 856;
         // fprintf(stderr,"Weather Sensor BHTR968    Indoor        Temp: %3.1fC    %3.1fF     Humidity: %d%%", temp_c, ((temp_c*9)/5)+32, get_os_humidity(msg));
@@ -384,7 +383,7 @@ static int oregon_scientific_v2_1_decode(r_device *decoder, bitbuffer_t *bitbuff
 
         int year    = ((msg[9] & 0x0F) * 10) + ((msg[9] & 0xF0) >> 4) + 2000;
         int month   = ((msg[8] & 0xF0) >> 4);
-        int weekday = ((msg[8] & 0x0F));
+        //int weekday = ((msg[8] & 0x0F));
         int day     = ((msg[7] & 0x0F) * 10) + ((msg[7] & 0xF0) >> 4);
         int hours   = ((msg[6] & 0x0F) * 10) + ((msg[6] & 0xF0) >> 4);
         int minutes = ((msg[5] & 0x0F) * 10) + ((msg[5] & 0xF0) >> 4);
@@ -738,6 +737,10 @@ static int oregon_scientific_v3_decode(r_device *decoder, bitbuffer_t *bitbuffer
     return DECODE_FAIL_SANITY;
 }
 
+/**
+Various Oregon Scientific protocols.
+@sa oregon_scientific_v2_1_decode() oregon_scientific_v3_decode()
+*/
 static int oregon_scientific_decode(r_device *decoder, bitbuffer_t *bitbuffer)
 {
     int ret = oregon_scientific_v2_1_decode(decoder, bitbuffer);

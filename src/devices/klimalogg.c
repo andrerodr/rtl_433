@@ -1,5 +1,5 @@
 /** @file
-    Klimalogg/30.3180.IT sensor decoder
+    Klimalogg/30.3180.IT sensor decoder.
 
     Copyright (C) 2020 Benjamin Larsson
 
@@ -9,9 +9,8 @@
     (at your option) any later version.
 */
 
-#include "decoder.h"
-
 /**
+Klimalogg/30.3180.IT sensor decoder.
 
 Random information:
 
@@ -40,6 +39,8 @@ play with the -l option (5000-15000 range) or a high sample rate.
 
 */
 
+#include "decoder.h"
+
 static uint8_t bcd_decode8(uint8_t x)
 {
     return ((x & 0xF0) >> 4) * 10 + (x & 0x0F);
@@ -54,7 +55,7 @@ static int klimalogg_decode(r_device *decoder, bitbuffer_t *bitbuffer)
     uint8_t msg[12] = {0};
     uint8_t crc, sequence_nr, temp_ad, humidity, battery_low;
     int16_t id, temp_bd;
-    char temperature_str[8] = {0};
+    char temperature_str[10] = {0};
     data_t *data;
 
     if (bitbuffer->bits_per_row[0] < 12*8) {
