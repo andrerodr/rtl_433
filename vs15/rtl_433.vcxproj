@@ -223,6 +223,7 @@ COPY ..\..\libusb\MS64\dll\libusb*.dll $(TargetDir)</Command>
     <ClCompile Include="..\src\devices\kerui.c" />
     <ClCompile Include="..\src\devices\klimalogg.c" />
     <ClCompile Include="..\src\devices\lacrosse.c" />
+    <ClCompile Include="..\src\devices\lacrosse_breezepro.c" />
     <ClCompile Include="..\src\devices\lacrosse_tx141x.c" />
     <ClCompile Include="..\src\devices\lacrosse_tx35.c" />
     <ClCompile Include="..\src\devices\lacrosse_ws7000.c" />
@@ -256,6 +257,7 @@ COPY ..\..\libusb\MS64\dll\libusb*.dll $(TargetDir)</Command>
     <ClCompile Include="..\src\devices\s3318p.c" />
     <ClCompile Include="..\src\devices\schraeder.c" />
     <ClCompile Include="..\src\devices\scmplus.c" />
+    <ClCompile Include="..\src\devices\secplus_v2.c" />
     <ClCompile Include="..\src\devices\sharp_spc775.c" />
     <ClCompile Include="..\src\devices\silvercrest.c" />
     <ClCompile Include="..\src\devices\simplisafe.c" />
@@ -264,6 +266,7 @@ COPY ..\..\libusb\MS64\dll\libusb*.dll $(TargetDir)</Command>
     <ClCompile Include="..\src\devices\springfield.c" />
     <ClCompile Include="..\src\devices\steelmate.c" />
     <ClCompile Include="..\src\devices\tfa_30_3196.c" />
+    <ClCompile Include="..\src\devices\tfa_30_3221.c" />
     <ClCompile Include="..\src\devices\tfa_drop_30.3233.c" />
     <ClCompile Include="..\src\devices\tfa_pool_thermometer.c" />
     <ClCompile Include="..\src\devices\tfa_twin_plus_30.3049.c" />
